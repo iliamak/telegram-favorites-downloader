@@ -5,6 +5,7 @@ import zipfile
 import io
 from telethon import TelegramClient, functions, types
 from telethon.errors import SessionPasswordNeededError
+from telethon.sessions import StringSession
 import asyncio
 import nest_asyncio
 from PIL import Image
@@ -22,11 +23,7 @@ active_clients = []
 def cleanup_clients():
     for client in active_clients:
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(client.disconnect())
-            else:
-                loop.run_until_complete(client.disconnect())
+            asyncio.run_coroutine_threadsafe(client.disconnect(), asyncio.get_event_loop())
         except:
             pass
 
@@ -40,23 +37,14 @@ st.set_page_config(
     layout="wide",
 )
 
-# Путь для временных файлов
-TEMP_DIR = tempfile.gettempdir()
-
-# API для Telegram (безопасно получаем из секретов)
+# API для Telegram (безопасно получаем из секретов или используем значения по умолчанию для разработки)
 try:
     API_ID = st.secrets["API_ID"]
     API_HASH = st.secrets["API_HASH"]
 except KeyError:
-    # Для локальной разработки или тестирования
+    # Для локальной разработки используем значения по умолчанию
     API_ID = 1713092
     API_HASH = "c96e3d68d80373c29270bb8a2edbb1f5"
-
-# Создаем уникальное имя для сессии каждого пользователя
-def get_session_path():
-    if 'session_id' not in st.session_state:
-        st.session_state.session_id = os.urandom(8).hex()
-    return os.path.join(TEMP_DIR, f"tg_session_{st.session_state.session_id}")
 
 # Функция для запуска асинхронных операций
 def run_async(coro):
@@ -68,16 +56,7 @@ def run_async(coro):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
     
-    try:
-        return loop.run_until_complete(coro)
-    except RuntimeError as e:
-        if "Event loop is closed" in str(e):
-            # Если цикл событий закрыт, создаем новый
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            return loop.run_until_complete(coro)
-        else:
-            raise
+    return loop.run_until_complete(coro)
 
 # Определить тип медиа
 def get_media_type(message):
@@ -109,17 +88,18 @@ def get_filename(message):
     else:
         return f"file_{message.id}"
 
-# Функция для создания и управления клиентом Telegram
-async def get_telegram_client():
-    session_path = get_session_path()
-    client = TelegramClient(session_path, API_ID, API_HASH)
-    
-    # Добавляем клиент в список активных для корректного закрытия
-    if client not in active_clients:
-        active_clients.append(client)
-    
-    await client.connect()
+# Создание клиента Telegram с использованием StringSession
+def create_client():
+    # Используем StringSession вместо файловой сессии для избежания блокировок
+    session_str = st.session_state.get('session_string', '')
+    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+    active_clients.append(client)
     return client
+
+# Сохранение строки сессии после авторизации
+async def save_session_string(client):
+    session_str = client.session.save()
+    st.session_state['session_string'] = session_str
 
 # Главная страница
 def main_page():
@@ -173,16 +153,23 @@ def login_page():
             
             if submit and phone:
                 try:
-                    # Создаем сессию для пользователя
+                    # Создаем клиента Telegram
+                    client = create_client()
+                    
+                    # Отправляем запрос кода подтверждения
                     async def send_code():
-                        client = await get_telegram_client()
+                        await client.connect()
                         if not await client.is_user_authorized():
                             # Сохраняем результат, который содержит phone_code_hash
                             sent_code = await client.send_code_request(phone)
+                            # Сохраняем сессию после получения кода
+                            await save_session_string(client)
                             return True, sent_code.phone_code_hash
                         else:
                             # Если уже авторизован
                             user = await client.get_me()
+                            # Сохраняем сессию после успешной авторизации
+                            await save_session_string(client)
                             st.session_state.user_id = user.id
                             st.session_state.phone = phone
                             return False, None
@@ -223,19 +210,28 @@ def verify_code_page():
             
             if submit and code:
                 try:
-                    # Получаем сессию пользователя
+                    # Создаем клиента Telegram с сохраненной строкой сессии
+                    client = create_client()
+                    
+                    # Получаем необходимые данные
                     phone = st.session_state.phone
                     phone_code_hash = st.session_state.phone_code_hash
                     
                     # Авторизуемся с кодом
                     async def sign_in():
-                        client = await get_telegram_client()
+                        await client.connect()
                         try:
                             # Используем phone_code_hash при подтверждении
                             await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
                             user = await client.get_me()
+                            # Сохраняем сессию после успешной авторизации
+                            await save_session_string(client)
+                            await client.disconnect()
                             return user.id, None
                         except SessionPasswordNeededError:
+                            # Сохраняем сессию перед проверкой пароля
+                            await save_session_string(client)
+                            await client.disconnect()
                             # Возвращаем флаг, что требуется двухфакторная аутентификация
                             return None, True
                     
@@ -275,12 +271,22 @@ def two_fa_page():
             
             if submit and password:
                 try:
+                    # Создаем клиента Telegram с сохраненной строкой сессии
+                    client = create_client()
+                    
                     # Авторизуемся с паролем
                     async def check_password():
-                        client = await get_telegram_client()
-                        await client.sign_in(password=password)
-                        user = await client.get_me()
-                        return user.id
+                        await client.connect()
+                        try:
+                            await client.sign_in(password=password)
+                            user = await client.get_me()
+                            # Сохраняем сессию после успешной авторизации
+                            await save_session_string(client)
+                            await client.disconnect()
+                            return user.id
+                        except Exception as e:
+                            await client.disconnect()
+                            raise e
                     
                     user_id = run_async(check_password())
                     st.session_state.user_id = user_id
@@ -305,9 +311,6 @@ def dashboard_page():
     col1, col2 = st.columns([6, 1])
     with col2:
         if st.button("Выйти", key="logout"):
-            # Закрываем все активные клиенты
-            cleanup_clients()
-            # Очищаем состояние сессии
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.session_state.page = "main"
@@ -363,15 +366,23 @@ def dashboard_page():
 # Получить все избранные медиафайлы
 def get_favorites():
     try:
+        if 'session_string' not in st.session_state:
+            return []
+            
+        # Создаем клиент с сохраненной сессией
+        client = create_client()
+        
         # Получаем избранные сообщения через API
         async def fetch_favorites():
-            client = await get_telegram_client()
-            
-            if not await client.is_user_authorized():
-                return []
-            
-            favorites = []
             try:
+                await client.connect()
+                
+                if not await client.is_user_authorized():
+                    await client.disconnect()
+                    return []
+                
+                favorites = []
+                
                 # Вместо GetSavedDialogsRequest используем альтернативный подход
                 # Получаем сообщения из "Сохраненные сообщения" (Saved Messages)
                 # В Telegram это диалог с самим собой
@@ -388,32 +399,44 @@ def get_favorites():
                             'filename': get_filename(message)
                         }
                         favorites.append(media_info)
+                
+                await client.disconnect()
+                return favorites
             except Exception as e:
+                if client.is_connected():
+                    await client.disconnect()
                 st.error(f"Ошибка при получении избранных: {str(e)}")
-            
-            return favorites
+                return []
         
         return run_async(fetch_favorites())
     except Exception as e:
-        st.error(f"Ошибка: {str(e)}")
+        st.error(f"Ошибка при получении избранных: {str(e)}")
         return []
 
 # Получить данные одного медиафайла
 def get_media_data(message_id):
     try:
+        if 'session_string' not in st.session_state:
+            return None
+            
+        # Создаем клиент с сохраненной сессией
+        client = create_client()
+        
         # Скачиваем файл через API
         async def download_media():
-            client = await get_telegram_client()
-            
-            if not await client.is_user_authorized():
-                return None
-            
             try:
+                await client.connect()
+                
+                if not await client.is_user_authorized():
+                    await client.disconnect()
+                    return None
+                
                 # Получаем сообщение с медиа - аргумент ids возвращает один объект, а не список
                 message = await client.get_messages('me', ids=message_id)
                 
                 # Проверяем, что сообщение существует и содержит медиа
                 if not message or not message.media:
+                    await client.disconnect()
                     return None
                 
                 file_buffer = io.BytesIO()
@@ -422,29 +445,41 @@ def get_media_data(message_id):
                 await client.download_media(message, file_buffer)
                 
                 file_buffer.seek(0)
-                return file_buffer.read()
+                result = file_buffer.read()
+                
+                await client.disconnect()
+                return result
             except Exception as e:
+                if client.is_connected():
+                    await client.disconnect()
                 st.error(f"Ошибка при скачивании: {str(e)}")
                 return None
         
         return run_async(download_media())
     except Exception as e:
-        st.error(f"Ошибка: {str(e)}")
+        st.error(f"Ошибка при скачивании: {str(e)}")
         return None
 
 # Получить все медиафайлы в ZIP-архиве
 def get_all_media_zip(favorites):
     try:
+        if 'session_string' not in st.session_state:
+            return None
+            
+        # Создаем клиент с сохраненной сессией
+        client = create_client()
+        
         # Создаем ZIP архив с медиафайлами
         async def download_all_media():
-            client = await get_telegram_client()
-            
-            if not await client.is_user_authorized():
-                return None
-            
-            memory_file = io.BytesIO()
-            with zipfile.ZipFile(memory_file, 'w') as zf:
-                try:
+            try:
+                await client.connect()
+                
+                if not await client.is_user_authorized():
+                    await client.disconnect()
+                    return None
+                
+                memory_file = io.BytesIO()
+                with zipfile.ZipFile(memory_file, 'w') as zf:
                     for item in favorites:
                         message_id = item['id']
                         filename = item['filename']
@@ -462,15 +497,19 @@ def get_all_media_zip(favorites):
                             # Добавляем в архив
                             file_buffer.seek(0)
                             zf.writestr(filename, file_buffer.read())
-                except Exception as e:
-                    st.error(f"Ошибка при создании архива: {str(e)}")
-            
-            memory_file.seek(0)
-            return memory_file.getvalue()
+                
+                await client.disconnect()
+                memory_file.seek(0)
+                return memory_file.getvalue()
+            except Exception as e:
+                if client.is_connected():
+                    await client.disconnect()
+                st.error(f"Ошибка при создании архива: {str(e)}")
+                return None
         
         return run_async(download_all_media())
     except Exception as e:
-        st.error(f"Ошибка: {str(e)}")
+        st.error(f"Ошибка при создании архива: {str(e)}")
         return None
 
 # Применяем стили
