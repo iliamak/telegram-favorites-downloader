@@ -1,3 +1,4 @@
 streamlit==1.31.0
 telethon==1.33.1
 pillow==10.2.0
+nest_asyncio==1.6.0
