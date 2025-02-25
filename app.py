@@ -10,9 +10,28 @@ import nest_asyncio
 from PIL import Image
 import base64
 from datetime import datetime
+import atexit
 
 # Применение nest_asyncio для исправления цикла событий в Streamlit
 nest_asyncio.apply()
+
+# Глобальный список активных клиентов для корректного закрытия
+active_clients = []
+
+# Функция для корректного закрытия всех клиентов при завершении работы
+def cleanup_clients():
+    for client in active_clients:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(client.disconnect())
+            else:
+                loop.run_until_complete(client.disconnect())
+        except:
+            pass
+
+# Регистрация функции для закрытия клиентов при выходе
+atexit.register(cleanup_clients)
 
 # Настройки приложения
 st.set_page_config(
@@ -25,8 +44,13 @@ st.set_page_config(
 TEMP_DIR = tempfile.gettempdir()
 
 # API для Telegram (безопасно получаем из секретов)
-API_ID = st.secrets["API_ID"]
-API_HASH = st.secrets["API_HASH"]
+try:
+    API_ID = st.secrets["API_ID"]
+    API_HASH = st.secrets["API_HASH"]
+except KeyError:
+    # Для локальной разработки или тестирования
+    API_ID = 1713092
+    API_HASH = "c96e3d68d80373c29270bb8a2edbb1f5"
 
 # Создаем уникальное имя для сессии каждого пользователя
 def get_session_path():
@@ -44,7 +68,16 @@ def run_async(coro):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
     
-    return loop.run_until_complete(coro)
+    try:
+        return loop.run_until_complete(coro)
+    except RuntimeError as e:
+        if "Event loop is closed" in str(e):
+            # Если цикл событий закрыт, создаем новый
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(coro)
+        else:
+            raise
 
 # Определить тип медиа
 def get_media_type(message):
@@ -75,6 +108,18 @@ def get_filename(message):
         return f"voice_{message.id}.ogg"
     else:
         return f"file_{message.id}"
+
+# Функция для создания и управления клиентом Telegram
+async def get_telegram_client():
+    session_path = get_session_path()
+    client = TelegramClient(session_path, API_ID, API_HASH)
+    
+    # Добавляем клиент в список активных для корректного закрытия
+    if client not in active_clients:
+        active_clients.append(client)
+    
+    await client.connect()
+    return client
 
 # Главная страница
 def main_page():
@@ -108,7 +153,7 @@ def main_page():
         
         if st.button("Войти через Telegram", type="primary", use_container_width=True):
             st.session_state.page = "login"
-            st.experimental_rerun()
+            st.rerun()
             
         st.divider()
         st.caption("Этот сервис использует Telegram API и не связан с Telegram Inc.")
@@ -129,12 +174,8 @@ def login_page():
             if submit and phone:
                 try:
                     # Создаем сессию для пользователя
-                    session_path = get_session_path()
-                    client = TelegramClient(session_path, API_ID, API_HASH)
-                    
-                    # Отправляем запрос кода подтверждения
                     async def send_code():
-                        await client.connect()
+                        client = await get_telegram_client()
                         if not await client.is_user_authorized():
                             # Сохраняем результат, который содержит phone_code_hash
                             sent_code = await client.send_code_request(phone)
@@ -153,16 +194,16 @@ def login_page():
                         # Сохраняем phone_code_hash для использования при подтверждении
                         st.session_state.phone_code_hash = phone_code_hash
                         st.session_state.page = "verify_code"
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.session_state.page = "dashboard"
-                        st.experimental_rerun()
+                        st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка при отправке кода: {str(e)}")
         
         if st.button("← Назад"):
             st.session_state.page = "main"
-            st.experimental_rerun()
+            st.rerun()
             
         st.info("Мы не сохраняем ваш номер телефона. Сессия временно хранится только на вашем устройстве.")
         st.divider()
@@ -185,12 +226,10 @@ def verify_code_page():
                     # Получаем сессию пользователя
                     phone = st.session_state.phone
                     phone_code_hash = st.session_state.phone_code_hash
-                    session_path = get_session_path()
-                    client = TelegramClient(session_path, API_ID, API_HASH)
                     
                     # Авторизуемся с кодом
                     async def sign_in():
-                        await client.connect()
+                        client = await get_telegram_client()
                         try:
                             # Используем phone_code_hash при подтверждении
                             await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
@@ -199,26 +238,24 @@ def verify_code_page():
                         except SessionPasswordNeededError:
                             # Возвращаем флаг, что требуется двухфакторная аутентификация
                             return None, True
-                        finally:
-                            await client.disconnect()
                     
                     user_id, two_fa_needed = run_async(sign_in())
                     
                     if two_fa_needed:
                         # Если требуется 2FA, перенаправляем на страницу ввода пароля
                         st.session_state.page = "two_fa"
-                        st.experimental_rerun()
+                        st.rerun()
                     elif user_id:
                         # Если успешно авторизовались
                         st.session_state.user_id = user_id
                         st.session_state.page = "dashboard"
-                        st.experimental_rerun()
+                        st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка при подтверждении кода: {str(e)}")
         
         if st.button("← Назад"):
             st.session_state.page = "login"
-            st.experimental_rerun()
+            st.rerun()
             
         st.info("Если вы не получили код, проверьте приложение Telegram на вашем телефоне или компьютере.")
         st.divider()
@@ -238,28 +275,23 @@ def two_fa_page():
             
             if submit and password:
                 try:
-                    # Получаем сессию пользователя
-                    session_path = get_session_path()
-                    client = TelegramClient(session_path, API_ID, API_HASH)
-                    
                     # Авторизуемся с паролем
                     async def check_password():
-                        await client.connect()
+                        client = await get_telegram_client()
                         await client.sign_in(password=password)
                         user = await client.get_me()
-                        await client.disconnect()
                         return user.id
                     
                     user_id = run_async(check_password())
                     st.session_state.user_id = user_id
                     st.session_state.page = "dashboard"
-                    st.experimental_rerun()
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Ошибка при вводе пароля: {str(e)}")
         
         if st.button("← Назад"):
             st.session_state.page = "verify_code"
-            st.experimental_rerun()
+            st.rerun()
             
         st.info("Этот пароль - дополнительный пароль, который вы установили в настройках безопасности Telegram.")
         st.divider()
@@ -273,10 +305,13 @@ def dashboard_page():
     col1, col2 = st.columns([6, 1])
     with col2:
         if st.button("Выйти", key="logout"):
+            # Закрываем все активные клиенты
+            cleanup_clients()
+            # Очищаем состояние сессии
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.session_state.page = "main"
-            st.experimental_rerun()
+            st.rerun()
     
     # Получаем избранные медиа
     with st.spinner("Загрузка ваших избранных медиафайлов..."):
@@ -328,16 +363,11 @@ def dashboard_page():
 # Получить все избранные медиафайлы
 def get_favorites():
     try:
-        phone = st.session_state.phone
-        session_path = get_session_path()
-        
         # Получаем избранные сообщения через API
         async def fetch_favorites():
-            client = TelegramClient(session_path, API_ID, API_HASH)
-            await client.connect()
+            client = await get_telegram_client()
             
             if not await client.is_user_authorized():
-                await client.disconnect()
                 return []
             
             favorites = []
@@ -361,7 +391,6 @@ def get_favorites():
             except Exception as e:
                 st.error(f"Ошибка при получении избранных: {str(e)}")
             
-            await client.disconnect()
             return favorites
         
         return run_async(fetch_favorites())
@@ -372,16 +401,11 @@ def get_favorites():
 # Получить данные одного медиафайла
 def get_media_data(message_id):
     try:
-        phone = st.session_state.phone
-        session_path = get_session_path()
-        
         # Скачиваем файл через API
         async def download_media():
-            client = TelegramClient(session_path, API_ID, API_HASH)
-            await client.connect()
+            client = await get_telegram_client()
             
             if not await client.is_user_authorized():
-                await client.disconnect()
                 return None
             
             try:
@@ -390,20 +414,17 @@ def get_media_data(message_id):
                 
                 # Проверяем, что сообщение существует и содержит медиа
                 if not message or not message.media:
-                    await client.disconnect()
                     return None
                 
                 file_buffer = io.BytesIO()
                 
                 # Скачиваем файл в буфер
                 await client.download_media(message, file_buffer)
-                await client.disconnect()
                 
                 file_buffer.seek(0)
                 return file_buffer.read()
             except Exception as e:
                 st.error(f"Ошибка при скачивании: {str(e)}")
-                await client.disconnect()
                 return None
         
         return run_async(download_media())
@@ -414,16 +435,11 @@ def get_media_data(message_id):
 # Получить все медиафайлы в ZIP-архиве
 def get_all_media_zip(favorites):
     try:
-        phone = st.session_state.phone
-        session_path = get_session_path()
-        
         # Создаем ZIP архив с медиафайлами
         async def download_all_media():
-            client = TelegramClient(session_path, API_ID, API_HASH)
-            await client.connect()
+            client = await get_telegram_client()
             
             if not await client.is_user_authorized():
-                await client.disconnect()
                 return None
             
             memory_file = io.BytesIO()
@@ -449,7 +465,6 @@ def get_all_media_zip(favorites):
                 except Exception as e:
                     st.error(f"Ошибка при создании архива: {str(e)}")
             
-            await client.disconnect()
             memory_file.seek(0)
             return memory_file.getvalue()
         
