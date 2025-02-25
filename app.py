@@ -385,13 +385,14 @@ def get_media_data(message_id):
                 return None
             
             try:
-                # Получаем сообщение с медиа
-                messages = await client.get_messages('me', ids=message_id)
-                if not messages or not messages[0].media:
+                # Получаем сообщение с медиа - аргумент ids возвращает один объект, а не список
+                message = await client.get_messages('me', ids=message_id)
+                
+                # Проверяем, что сообщение существует и содержит медиа
+                if not message or not message.media:
                     await client.disconnect()
                     return None
                 
-                message = messages[0]
                 file_buffer = io.BytesIO()
                 
                 # Скачиваем файл в буфер
@@ -432,10 +433,11 @@ def get_all_media_zip(favorites):
                         message_id = item['id']
                         filename = item['filename']
                         
-                        # Получаем сообщение
-                        messages = await client.get_messages('me', ids=message_id)
-                        if messages and messages[0].media:
-                            message = messages[0]
+                        # Получаем сообщение - аргумент ids возвращает один объект, а не список
+                        message = await client.get_messages('me', ids=message_id)
+                        
+                        # Проверяем, что сообщение существует и содержит медиа
+                        if message and message.media:
                             file_buffer = io.BytesIO()
                             
                             # Скачиваем файл
