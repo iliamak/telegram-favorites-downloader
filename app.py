@@ -342,27 +342,22 @@ def get_favorites():
             
             favorites = []
             try:
-                result = await client(functions.messages.GetSavedDialogsRequest(
-                    offset_date=0,
-                    offset_id=0,
-                    offset_peer=types.InputPeerEmpty(),
-                    limit=100,
-                    hash=0
-                ))
+                # Вместо GetSavedDialogsRequest используем альтернативный подход
+                # Получаем сообщения из "Сохраненные сообщения" (Saved Messages)
+                # В Telegram это диалог с самим собой
+                messages = await client.get_messages('me', limit=200)
                 
-                # Получаем медиа из избранных диалогов
-                for dialog in result.dialogs:
-                    messages = await client.get_messages(dialog.peer, limit=100)
-                    for message in messages:
-                        if message.media:
-                            # Добавляем информацию о медиа
-                            media_info = {
-                                'id': message.id,
-                                'date': message.date.strftime('%Y-%m-%d %H:%M:%S'),
-                                'type': get_media_type(message),
-                                'filename': get_filename(message)
-                            }
-                            favorites.append(media_info)
+                # Отбираем только медиафайлы
+                for message in messages:
+                    if message.media:
+                        # Добавляем информацию о медиа
+                        media_info = {
+                            'id': message.id,
+                            'date': message.date.strftime('%Y-%m-%d %H:%M:%S'),
+                            'type': get_media_type(message),
+                            'filename': get_filename(message)
+                        }
+                        favorites.append(media_info)
             except Exception as e:
                 st.error(f"Ошибка при получении избранных: {str(e)}")
             
