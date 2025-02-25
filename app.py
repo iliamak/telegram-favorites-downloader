@@ -4,6 +4,7 @@ import tempfile
 import zipfile
 import io
 from telethon import TelegramClient, functions, types
+from telethon.errors import SessionPasswordNeededError
 import asyncio
 import nest_asyncio
 from PIL import Image
@@ -190,15 +191,28 @@ def verify_code_page():
                     # Авторизуемся с кодом
                     async def sign_in():
                         await client.connect()
-                        # Используем phone_code_hash при подтверждении
-                        await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
-                        user = await client.get_me()
-                        return user.id
+                        try:
+                            # Используем phone_code_hash при подтверждении
+                            await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+                            user = await client.get_me()
+                            return user.id, None
+                        except SessionPasswordNeededError:
+                            # Возвращаем флаг, что требуется двухфакторная аутентификация
+                            return None, True
+                        finally:
+                            await client.disconnect()
                     
-                    user_id = run_async(sign_in())
-                    st.session_state.user_id = user_id
-                    st.session_state.page = "dashboard"
-                    st.experimental_rerun()
+                    user_id, two_fa_needed = run_async(sign_in())
+                    
+                    if two_fa_needed:
+                        # Если требуется 2FA, перенаправляем на страницу ввода пароля
+                        st.session_state.page = "two_fa"
+                        st.experimental_rerun()
+                    elif user_id:
+                        # Если успешно авторизовались
+                        st.session_state.user_id = user_id
+                        st.session_state.page = "dashboard"
+                        st.experimental_rerun()
                 except Exception as e:
                     st.error(f"Ошибка при подтверждении кода: {str(e)}")
         
@@ -207,6 +221,47 @@ def verify_code_page():
             st.experimental_rerun()
             
         st.info("Если вы не получили код, проверьте приложение Telegram на вашем телефоне или компьютере.")
+        st.divider()
+        st.caption("Этот сервис использует Telegram API и не связан с Telegram Inc.")
+
+# Страница ввода пароля 2FA
+def two_fa_page():
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        st.title("Двухфакторная аутентификация")
+        st.write("Введите пароль от вашего аккаунта Telegram")
+        
+        with st.form("two_fa_form"):
+            password = st.text_input("Пароль", type="password")
+            submit = st.form_submit_button("Войти", use_container_width=True)
+            
+            if submit and password:
+                try:
+                    # Получаем сессию пользователя
+                    session_path = get_session_path()
+                    client = TelegramClient(session_path, API_ID, API_HASH)
+                    
+                    # Авторизуемся с паролем
+                    async def check_password():
+                        await client.connect()
+                        await client.sign_in(password=password)
+                        user = await client.get_me()
+                        await client.disconnect()
+                        return user.id
+                    
+                    user_id = run_async(check_password())
+                    st.session_state.user_id = user_id
+                    st.session_state.page = "dashboard"
+                    st.experimental_rerun()
+                except Exception as e:
+                    st.error(f"Ошибка при вводе пароля: {str(e)}")
+        
+        if st.button("← Назад"):
+            st.session_state.page = "verify_code"
+            st.experimental_rerun()
+            
+        st.info("Этот пароль - дополнительный пароль, который вы установили в настройках безопасности Telegram.")
         st.divider()
         st.caption("Этот сервис использует Telegram API и не связан с Telegram Inc.")
 
@@ -445,5 +500,7 @@ elif st.session_state.page == "login":
     login_page()
 elif st.session_state.page == "verify_code":
     verify_code_page()
+elif st.session_state.page == "two_fa":
+    two_fa_page()
 elif st.session_state.page == "dashboard":
     dashboard_page()
