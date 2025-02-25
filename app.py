@@ -5,9 +5,13 @@ import zipfile
 import io
 from telethon import TelegramClient, functions, types
 import asyncio
+import nest_asyncio
 from PIL import Image
 import base64
 from datetime import datetime
+
+# Применение nest_asyncio для исправления цикла событий в Streamlit
+nest_asyncio.apply()
 
 # Настройки приложения
 st.set_page_config(
@@ -31,12 +35,15 @@ def get_session_path():
 
 # Функция для запуска асинхронных операций
 def run_async(coro):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+        # Пытаемся использовать существующий цикл событий
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        # Если цикла событий нет, создаем новый
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    return loop.run_until_complete(coro)
 
 # Определить тип медиа
 def get_media_type(message):
