@@ -135,19 +135,22 @@ def login_page():
                     async def send_code():
                         await client.connect()
                         if not await client.is_user_authorized():
-                            await client.send_code_request(phone)
-                            return True
+                            # Сохраняем результат, который содержит phone_code_hash
+                            sent_code = await client.send_code_request(phone)
+                            return True, sent_code.phone_code_hash
                         else:
                             # Если уже авторизован
                             user = await client.get_me()
                             st.session_state.user_id = user.id
                             st.session_state.phone = phone
-                            return False
+                            return False, None
                         
-                    need_code = run_async(send_code())
+                    need_code, phone_code_hash = run_async(send_code())
                     
                     if need_code:
                         st.session_state.phone = phone
+                        # Сохраняем phone_code_hash для использования при подтверждении
+                        st.session_state.phone_code_hash = phone_code_hash
                         st.session_state.page = "verify_code"
                         st.experimental_rerun()
                     else:
@@ -180,13 +183,15 @@ def verify_code_page():
                 try:
                     # Получаем сессию пользователя
                     phone = st.session_state.phone
+                    phone_code_hash = st.session_state.phone_code_hash
                     session_path = get_session_path()
                     client = TelegramClient(session_path, API_ID, API_HASH)
                     
                     # Авторизуемся с кодом
                     async def sign_in():
                         await client.connect()
-                        await client.sign_in(phone, code)
+                        # Используем phone_code_hash при подтверждении
+                        await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
                         user = await client.get_me()
                         return user.id
                     
